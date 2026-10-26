@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard — Medimo</title>
+</head>
+<body>
+    <h1>Dashboard Medimo</h1>
+    <p>Selamat datang, {{ user["username"] }}!</p>
+    <p>Kamu berhasil login.</p>
+    <form method="post" action="{{ url_for('logout') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Keluar</button>
+</form>
+</body>
+</html>
