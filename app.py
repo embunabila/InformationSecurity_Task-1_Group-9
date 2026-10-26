@@ -3,6 +3,9 @@ import os
 import re
 import secrets
 import sqlite3
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from flask import Flask, redirect, render_template, request, session, url_for
 from werkzeug.security import (
@@ -21,6 +24,114 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 USERNAME_PATTERN = re.compile(r"[a-z0-9_]{3,30}")
 
+PROFILE_FIELDS = (
+    "name",
+    "birth_date",
+    "gender",
+    "weight",
+    "height",
+    "phone",
+    "emergency_contact",
+    "allergies",
+    "health_conditions",
+    "routine_medication",
+)
+
+
+def today_jakarta():
+    return datetime.now(ZoneInfo("Asia/Jakarta")).date()
+
+
+def calculate_age(birth_date, today):
+    return (
+        today.year
+        - birth_date.year
+        - (
+            (today.month, today.day)
+            < (birth_date.month, birth_date.day)
+        )
+    )
+
+
+def validate_profile(form, today):
+    profile = {
+        field: form.get(field, "").strip()
+        for field in PROFILE_FIELDS
+    }
+    errors = {}
+    age = None
+
+    if not profile["name"]:
+        errors["name"] = "Nama wajib diisi."
+    elif len(profile["name"]) > 100:
+        errors["name"] = "Nama maksimal 100 karakter."
+
+    birth_date_text = profile["birth_date"]
+
+    if not birth_date_text:
+        errors["birth_date"] = "Tanggal lahir wajib diisi."
+    elif not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", birth_date_text):
+        errors["birth_date"] = "Format tanggal lahir harus YYYY-MM-DD."
+    else:
+        try:
+            birth_date = date.fromisoformat(birth_date_text)
+        except ValueError:
+            errors["birth_date"] = "Tanggal lahir tidak valid."
+        else:
+            if birth_date > today:
+                errors["birth_date"] = "Tanggal lahir tidak boleh di masa depan."
+            else:
+                age = calculate_age(birth_date, today)
+
+    if profile["gender"] not in {
+        "perempuan",
+        "laki-laki",
+        "tidak disebutkan",
+    }:
+        errors["gender"] = "Pilih jenis kelamin yang tersedia."
+
+    for field, label in (
+        ("weight", "Berat badan"),
+        ("height", "Tinggi badan"),
+    ):
+        value = profile[field]
+
+        if not value:
+            profile[field] = None
+            continue
+
+        # Bentuk angka desimal biasa, misalnya 60 atau 60.5.
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+            errors[field] = f"{label} harus berupa angka positif."
+            continue
+
+        try:
+            number = Decimal(value)
+        except InvalidOperation:
+            errors[field] = f"{label} tidak valid."
+        else:
+            if not number.is_finite() or number <= 0:
+                errors[field] = f"{label} harus berupa angka positif."
+
+    phone = profile["phone"]
+
+    if not phone:
+        errors["phone"] = "Nomor HP wajib diisi."
+    elif not re.fullmatch(r"[0-9]{1,20}", phone):
+        errors["phone"] = "Nomor HP harus 1–20 digit angka."
+
+    for field, label, max_length in (
+        ("emergency_contact", "Kontak darurat", 200),
+        ("allergies", "Alergi", 1000),
+        ("health_conditions", "Kondisi kesehatan", 1000),
+        ("routine_medication", "Obat rutin", 1000),
+    ):
+        if len(profile[field]) > max_length:
+            errors[field] = f"{label} maksimal {max_length} karakter."
+        elif not profile[field]:
+            profile[field] = None
+
+    return profile, errors, age
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -153,6 +264,55 @@ def logout():
     session.clear()
 
     return redirect(url_for("login"))
+
+@app.route("/profile", methods=["GET", "POST"])
+def health_profile():
+    user_id = session.get("user_id")
+
+    if user_id is None:
+        return redirect(url_for("login"))
+
+    user = get_user_by_id(user_id)
+
+    if user is None:
+        session.clear()
+        return redirect(url_for("login"))
+
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+
+    errors = {}
+    valid = False
+    age = None
+    today = today_jakarta()
+
+    if request.method == "POST":
+        submitted_token = request.form.get("csrf_token", "")
+
+        if not hmac.compare_digest(
+            submitted_token.encode("utf-8"),
+            session["csrf_token"].encode("utf-8"),
+        ):
+            return "Form tidak valid. Muat ulang halaman dan coba lagi.", 400
+
+        profile, errors, age = validate_profile(request.form, today)
+        valid = not errors
+
+        # Belum ada enkripsi atau penyimpanan.
+        # Jangan masukkan profile ke session, log, atau file.
+
+    response = app.make_response(
+        render_template(
+            "profile.html",
+            errors=errors,
+            valid=valid,
+            age=age if valid else None,
+            today=today.isoformat(),
+            csrf_token=session["csrf_token"],
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 if __name__ == "__main__":
     app.run()

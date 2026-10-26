@@ -11,6 +11,7 @@
     <p>Kamu berhasil login.</p>
     <form method="post" action="{{ url_for('logout') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <a href="{{ url_for('health_profile') }}">Profil kesehatan</a>
     <button type="submit">Keluar</button>
 </form>
 </body>

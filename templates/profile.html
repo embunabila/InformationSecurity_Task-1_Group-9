@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Profil kesehatan — Medimo</title>
+</head>
+<body>
+    <h1>Profil kesehatan</h1>
+    <p>Tahap validasi saja. Profil belum disimpan.</p>
+
+    {% if errors %}
+        <div role="alert">
+            <p>Periksa kembali input berikut:</p>
+            <ul>
+                {% for message in errors.values() %}
+                    <li>{{ message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    {% if valid %}
+        <div role="status">
+            <p>Input valid, tetapi belum disimpan.</p>
+            <p>Umur berdasarkan tanggal lahir: {{ age }} tahun.</p>
+        </div>
+    {% endif %}
+
+    <form method="post"
+          action="{{ url_for('health_profile') }}"
+          autocomplete="off">
+
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <p>
+            <label for="name">Nama *</label><br>
+            <input id="name" name="name" maxlength="100" required>
+        </p>
+
+        <p>
+            <label for="birth_date">Tanggal lahir *</label><br>
+            <input id="birth_date" name="birth_date"
+                   type="date" max="{{ today }}" required>
+        </p>
+
+        <p>
+            <label for="gender">Jenis kelamin *</label><br>
+            <select id="gender" name="gender" required>
+                <option value="">Pilih</option>
+                <option value="perempuan">Perempuan</option>
+                <option value="laki-laki">Laki-laki</option>
+                <option value="tidak disebutkan">Tidak disebutkan</option>
+            </select>
+        </p>
+
+        <p>
+            <label for="weight">Berat badan (kg)</label><br>
+            <input id="weight" name="weight" type="number"
+                   step="any" placeholder="Not recorded yet">
+        </p>
+
+        <p>
+            <label for="height">Tinggi badan (cm)</label><br>
+            <input id="height" name="height" type="number"
+                   step="any" placeholder="Not recorded yet">
+        </p>
+
+        <p>
+            <label for="phone">Nomor HP *</label><br>
+            <input id="phone" name="phone" type="tel"
+                   inputmode="numeric" pattern="[0-9]{1,20}"
+                   maxlength="20" required>
+        </p>
+
+        <p>
+            <label for="emergency_contact">Kontak darurat: nama dan nomor</label><br>
+            <textarea id="emergency_contact" name="emergency_contact"
+                      maxlength="200"
+                      placeholder="Not recorded yet"></textarea>
+        </p>
+
+        <p>
+            <label for="allergies">Alergi</label><br>
+            <textarea id="allergies" name="allergies"
+                      maxlength="1000"
+                      placeholder="Not recorded yet"></textarea>
+        </p>
+
+        <p>
+            <label for="health_conditions">Kondisi kesehatan</label><br>
+            <textarea id="health_conditions" name="health_conditions"
+                      maxlength="1000"
+                      placeholder="Not recorded yet"></textarea>
+        </p>
+
+        <p>
+            <label for="routine_medication">Obat rutin</label><br>
+            <textarea id="routine_medication" name="routine_medication"
+                      maxlength="1000"
+                      placeholder="Not recorded yet"></textarea>
+        </p>
+
+        <button type="submit">Validate profile</button>
+    </form>
+
+    <p><a href="{{ url_for('dashboard') }}">Kembali ke dashboard</a></p>
+</body>
+</html>
