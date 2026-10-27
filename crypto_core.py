@@ -1,13 +1,37 @@
 import json
 from uuid import UUID
 
-from Crypto.Hash import SHA256
+from Crypto.Cipher import AES
+from Crypto.Hash import HMAC, SHA256
 from Crypto.Protocol.KDF import HKDF
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
 
 ALGORITHMS = ("AES", "DES", "RC4")
 
 MASTER_KEY_SIZE = 32
 SALT_SIZE = 16
+
+MAGIC = b"MDMO"
+FORMAT_VERSION = 1
+TAG_SIZE = 32
+BASE_HEADER_SIZE = 26
+
+MAX_PAYLOAD_SIZE = 25 * 1024 * 1024 + 16 * 1024 + 4
+
+ALGORITHM_IDS = {"AES": 1, "DES": 2, "RC4": 3}
+ALGORITHM_NAMES = {1: "AES", 2: "DES", 3: "RC4"}
+
+IV_SIZES = {"AES": 16, "DES": 8, "RC4": 0}
+BLOCK_SIZES = {"AES": 16, "DES": 8, "RC4": 0}
+
+MAX_CIPHERTEXT_SIZES = {
+    "AES": 16 * (MAX_PAYLOAD_SIZE // 16 + 1),
+    "DES": 8 * (MAX_PAYLOAD_SIZE // 8 + 1),
+    "RC4": MAX_PAYLOAD_SIZE,
+}
+
+MAX_ENVELOPE_SIZE = 42 + MAX_CIPHERTEXT_SIZES["AES"] + TAG_SIZE
 
 
 class CryptoConfigError(ValueError):
@@ -117,10 +141,176 @@ def _encode_context(context):
             raise ValueError(
                 "item_id berkas harus UUID huruf kecil dengan tanda hubung."
             )
-
+            
     return json.dumps(
         context,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+
+def _validate_algorithm(algorithm):
+    if not isinstance(algorithm, str) or algorithm not in ALGORITHMS:
+        raise ValueError("The algorithm has to be AES, DES, or RC4")
+
+
+def _parse_envelope(envelope):
+    if not isinstance(envelope, bytes):
+        raise ValueError("Envelope harus berupa bytes")
+
+    if not BASE_HEADER_SIZE + TAG_SIZE <= len(envelope) <= MAX_ENVELOPE_SIZE:
+        raise InvalidEnvelopeError("Ukuran envelope tidak valid")
+
+    if envelope[:4] != MAGIC or envelope[4] != FORMAT_VERSION:
+        raise InvalidEnvelopeError("Format atau versi tidak dikenal")
+
+    algorithm = ALGORITHM_NAMES.get(envelope[5])
+    if algorithm is None:
+        raise InvalidEnvelopeError("ID algoritma tidak dikenal")
+
+    ciphertext_length = int.from_bytes(envelope[22:26], "big")
+    if ciphertext_length > MAX_CIPHERTEXT_SIZES[algorithm]:
+        raise InvalidEnvelopeError("Ciphertext terlalu besar")
+
+    block_size = BLOCK_SIZES[algorithm]
+    if block_size != 0:
+        if ciphertext_length < block_size or ciphertext_length % block_size != 0:
+            raise InvalidEnvelopeError("Panjang ciphertext tidak valid")
+
+    header_size = BASE_HEADER_SIZE + IV_SIZES[algorithm]
+    expected_size = header_size + ciphertext_length + TAG_SIZE
+
+    if len(envelope) != expected_size:
+        raise InvalidEnvelopeError("Panjang envelope tidak cocok")
+
+    return {
+        "algorithm": algorithm,
+        "salt": envelope[6:22],
+        "iv": envelope[26:header_size],
+        "header": envelope[:header_size],
+        "ciphertext": envelope[header_size:-TAG_SIZE],
+        "tag": envelope[-TAG_SIZE:],
+    }
+
+
+def _make_mac(mac_key, header, context_bytes, ciphertext):
+    if len(context_bytes) > 2**32 - 1:
+        raise ValueError("Context terlalu besar.")
+
+    mac = HMAC.new(mac_key, digestmod=SHA256)
+    mac.update(header)
+    mac.update(len(context_bytes).to_bytes(4, "big"))
+    mac.update(context_bytes)
+    mac.update(ciphertext)
+
+    return mac
+
+def encrypt_blob(data, master_key, algorithm, context):
+    _validate_master_key(master_key)
+    _validate_algorithm(algorithm)
+
+    if not isinstance(data, bytes):
+        raise ValueError("Data harus berupa bytes.")
+
+    if len(data) > MAX_PAYLOAD_SIZE:
+        raise ValueError("Data melebihi batas ukuran.")
+
+    context_bytes = _encode_context(context)
+
+    if algorithm != "AES":
+        raise NotImplementedError(
+            "Tahap ini baru mendukung enkripsi AES."
+        )
+
+    salt = get_random_bytes(SALT_SIZE)
+    iv = get_random_bytes(AES.block_size)
+
+    encryption_key, mac_key = _derive_keys(
+        master_key, salt, algorithm
+    )
+
+    padded_data = pad(data, AES.block_size, style="pkcs7")
+
+    encryptor = AES.new(
+        encryption_key,
+        AES.MODE_CBC,
+        iv=iv,
+    )
+    ciphertext = encryptor.encrypt(padded_data)
+
+    header = (
+        MAGIC
+        + bytes([FORMAT_VERSION, ALGORITHM_IDS[algorithm]])
+        + salt
+        + len(ciphertext).to_bytes(4, "big")
+        + iv
+    )
+
+    tag = _make_mac(
+        mac_key, header, context_bytes, ciphertext
+    ).digest()
+
+    return header + ciphertext + tag
+
+def decrypt_blob(envelope, master_key, expected_algorithm, context):
+    _validate_master_key(master_key)
+    _validate_algorithm(expected_algorithm)
+
+    context_bytes = _encode_context(context)
+    parts = _parse_envelope(envelope)
+
+    if parts["algorithm"] != expected_algorithm:
+        raise InvalidEnvelopeError("Algoritma paket tidak cocok.")
+
+    encryption_key, mac_key = _derive_keys(
+        master_key,
+        parts["salt"],
+        parts["algorithm"],
+    )
+
+    verifier = _make_mac(
+        mac_key,
+        parts["header"],
+        context_bytes,
+        parts["ciphertext"],
+    )
+
+    try:
+        verifier.verify(parts["tag"])
+    except ValueError:
+        raise InvalidEnvelopeError(
+            "Data tidak dapat diverifikasi."
+        ) from None
+
+    if parts["algorithm"] != "AES":
+        raise NotImplementedError(
+            "Tahap ini baru mendukung dekripsi AES."
+        )
+
+    try:
+        decryptor = AES.new(
+            encryption_key,
+            AES.MODE_CBC,
+            iv=parts["iv"],
+        )
+
+        padded_plaintext = decryptor.decrypt(parts["ciphertext"])
+
+        plaintext = unpad(
+            padded_plaintext,
+            AES.block_size,
+            style="pkcs7",
+        )
+    except ValueError:
+        raise InvalidEnvelopeError(
+            "Data tidak dapat dibuka."
+        ) from None
+
+    if len(plaintext) > MAX_PAYLOAD_SIZE:
+        raise InvalidEnvelopeError("Data melebihi batas ukuran.")
+
+    return plaintext
+
+
+
+
