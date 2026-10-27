@@ -318,34 +318,24 @@ def encrypt_profile(profile, user_id):
     }
 
 
+
 def decrypt_profile(envelopes, user_id):
     context = profile_context(user_id)
-    decrypted_profiles = []
 
-    for algorithm in ALGORITHMS:
-        envelope = envelopes[f"{algorithm.lower()}_envelope"]
-        plaintext = decrypt_blob(
-            envelope,
-            MASTER_KEY,
-            algorithm,
-            context,
-        )
-        profile = json.loads(plaintext.decode("utf-8"))
+    plaintext = decrypt_blob(
+        envelopes["aes_envelope"],
+        MASTER_KEY,
+        "AES",
+        context,
+    )
 
-        if not isinstance(profile, dict):
-            raise ValueError("Format profil tidak valid.")
+    profile = json.loads(plaintext.decode("utf-8"))
 
-        decrypted_profiles.append(profile)
+    if not isinstance(profile, dict):
+        raise ValueError("Format profil tidak valid.")
 
-    # Pastikan ketiga salinan berisi data profil yang sama.
-    if not (
-        decrypted_profiles[0]
-        == decrypted_profiles[1]
-        == decrypted_profiles[2]
-    ):
-        raise ValueError("Isi envelope profil tidak konsisten.")
+    return profile
 
-    return decrypted_profiles[0]
 
 @app.route("/profile", methods=["GET", "POST"])
 def health_profile():
@@ -370,7 +360,10 @@ def health_profile():
     profile = None
     storage_error = False
 
-    envelopes = get_health_profile_envelopes(user_id)
+    try:
+        envelopes = get_health_profile_envelopes(user_id)
+    except sqlite3.Error: 
+        return "Data profil tidak dapat diakses. Coba lagi nanti.", 503
 
     if envelopes is not None:
         try:
@@ -401,6 +394,13 @@ def health_profile():
         ):
             return "Form tidak valid. Muat ulang halaman dan coba lagi.", 400
 
+        if storage_error:
+            response = app.make_response((
+                "Data profil tidak dapat diverifikasi. Coba lagi nanti.", 503
+            ))
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        
         profile, errors, age = validate_profile(request.form, today)
         valid = not errors
 
@@ -414,7 +414,7 @@ def health_profile():
                     encrypted["DES"],
                     encrypted["RC4"],
                 )
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, sqlite3.Error):
                 storage_error = True
                 valid = False
             else:
