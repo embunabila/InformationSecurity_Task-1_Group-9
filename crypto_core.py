@@ -1,7 +1,7 @@
 import json
 from uuid import UUID
 
-from Crypto.Cipher import AES
+from Crypto.Cipher import AES, ARC4, DES
 from Crypto.Hash import HMAC, SHA256
 from Crypto.Protocol.KDF import HKDF
 from Crypto.Random import get_random_bytes
@@ -217,26 +217,32 @@ def encrypt_blob(data, master_key, algorithm, context):
 
     context_bytes = _encode_context(context)
 
-    if algorithm != "AES":
-        raise NotImplementedError(
-            "Tahap ini baru mendukung enkripsi AES."
-        )
-
     salt = get_random_bytes(SALT_SIZE)
-    iv = get_random_bytes(AES.block_size)
 
     encryption_key, mac_key = _derive_keys(
         master_key, salt, algorithm
     )
 
-    padded_data = pad(data, AES.block_size, style="pkcs7")
+    if algorithm == "RC4":
+        iv = b""
+        encryptor = ARC4.new(encryption_key)
+        ciphertext = encryptor.encrypt(data)
+    else:
+        cipher_module = AES if algorithm == "AES" else DES
+        iv = get_random_bytes(cipher_module.block_size)
 
-    encryptor = AES.new(
-        encryption_key,
-        AES.MODE_CBC,
-        iv=iv,
-    )
-    ciphertext = encryptor.encrypt(padded_data)
+        padded_data = pad(
+            data,
+            cipher_module.block_size,
+            style="pkcs7",
+        )
+
+        encryptor = cipher_module.new(
+            encryption_key,
+            cipher_module.MODE_CBC,
+            iv=iv,
+        )
+        ciphertext = encryptor.encrypt(padded_data)
 
     header = (
         MAGIC
@@ -282,25 +288,30 @@ def decrypt_blob(envelope, master_key, expected_algorithm, context):
             "Data tidak dapat diverifikasi."
         ) from None
 
-    if parts["algorithm"] != "AES":
-        raise NotImplementedError(
-            "Tahap ini baru mendukung dekripsi AES."
-        )
-
     try:
-        decryptor = AES.new(
-            encryption_key,
-            AES.MODE_CBC,
-            iv=parts["iv"],
-        )
+        if parts["algorithm"] == "RC4":
+            decryptor = ARC4.new(encryption_key)
+            plaintext = decryptor.decrypt(parts["ciphertext"])
+        else:
+            cipher_module = (
+                AES if parts["algorithm"] == "AES" else DES
+            )
 
-        padded_plaintext = decryptor.decrypt(parts["ciphertext"])
+            decryptor = cipher_module.new(
+                encryption_key,
+                cipher_module.MODE_CBC,
+                iv=parts["iv"],
+            )
 
-        plaintext = unpad(
-            padded_plaintext,
-            AES.block_size,
-            style="pkcs7",
-        )
+            padded_plaintext = decryptor.decrypt(
+                parts["ciphertext"]
+            )
+
+            plaintext = unpad(
+                padded_plaintext,
+                cipher_module.block_size,
+                style="pkcs7",
+            )
     except ValueError:
         raise InvalidEnvelopeError(
             "Data tidak dapat dibuka."
