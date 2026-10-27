@@ -1,14 +1,16 @@
 import hmac
+import io
 import os
 import re
 import secrets
 import sqlite3
+import uuid
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 from config import load_master_key
 
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import (
     check_password_hash,
     generate_password_hash,
@@ -24,12 +26,17 @@ from crypto_core import (
     encrypt_blob,
 )
 from db import (
+    create_medical_file,
+    get_medical_file,
     create_user,
     get_health_profile_envelopes,
     get_user_by_id,
     get_user_by_username,
     save_health_profile,
 )
+
+from file_payload import pack_file_payload, unpack_file_payload
+from storage import delete_envelope_set, write_envelope_set, read_envelope
 app = Flask(__name__)
 
 secret_key = os.environ.get("SECRET_KEY")
@@ -41,6 +48,9 @@ MASTER_KEY = load_master_key()
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+MAX_UPLOAD_FILE_SIZE = 25 * 1024 * 1024 
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_FILE_SIZE + 128 * 1024 
 
 @app.route("/")
 def home():
@@ -157,6 +167,17 @@ def validate_profile(form, today):
             profile[field] = None
 
     return profile, errors, age
+
+def read_upload_file(uploaded_file):
+    file_bytes = uploaded_file.stream.read(MAX_UPLOAD_FILE_SIZE + 1)
+
+    if len(file_bytes) > MAX_UPLOAD_FILE_SIZE:
+        raise ValueError("Ukuran file maksimal 25 MiB.")
+
+    if not file_bytes:
+        raise ValueError("File tidak boleh kosong.")
+
+    return file_bytes
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -434,6 +455,166 @@ def health_profile():
         )
     )
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+@app.route("/archives/upload", methods=["POST"])
+def upload_archive():
+    user_id = session.get("user_id")
+
+    if user_id is None:
+        return redirect(url_for("login"))
+
+    try:
+        user = get_user_by_id(user_id)
+    except sqlite3.Error:
+        return "Akun tidak dapat diperiksa. Coba lagi nanti.", 503
+
+    if user is None:
+        session.clear()
+        return redirect(url_for("login"))
+
+    expected_token = session.get("csrf_token")
+    submitted_token = request.form.get("csrf_token", "")
+
+    if (
+        not isinstance(expected_token, str)
+        or not hmac.compare_digest(
+            submitted_token.encode("utf-8"),
+            expected_token.encode("utf-8"),
+        )
+    ):
+        return "Form tidak valid. Muat ulang halaman dan coba lagi.", 400
+
+    category = request.form.get("category", "")
+    uploaded_file = request.files.get("file")
+
+    if category not in {"identity", "document", "video"}:
+        return "Kategori berkas tidak valid.", 400
+
+    if uploaded_file is None or not uploaded_file.filename:
+        return "Pilih file yang ingin diunggah.", 400
+
+    try:
+        file_bytes = read_upload_file(uploaded_file)
+
+        metadata = {
+            "filename": uploaded_file.filename,
+            "mime": uploaded_file.mimetype or "application/octet-stream",
+        }
+        payload = pack_file_payload(metadata, file_bytes)
+
+        file_id = str(uuid.uuid4())
+        context = {
+            "owner_id": user_id,
+            "kind": "file",
+            "item_id": file_id,
+        }
+
+        envelopes = {
+            algorithm: encrypt_blob(
+                payload,
+                MASTER_KEY,
+                algorithm,
+                context,
+            )
+            for algorithm in ALGORITHMS
+        }
+    except ValueError:
+        return "Berkas tidak valid atau melebihi batas ukuran.", 400
+
+    try:
+        storage_names = write_envelope_set(envelopes)
+    except (OSError, ValueError, TypeError):
+        return "Berkas tidak dapat disimpan. Coba lagi nanti.", 503
+
+    try:
+        create_medical_file(
+            file_id,
+            user_id,
+            category,
+            storage_names["AES"],
+            storage_names["DES"],
+            storage_names["RC4"],
+        )
+    except (sqlite3.Error, ValueError, TypeError):
+        # Coba hapus setiap salinan yang sudah ditulis.
+        for storage_name in storage_names.values():
+            try:
+                from storage import delete_envelope
+                delete_envelope(storage_name)
+            except (OSError, ValueError):
+                app.logger.error(
+                    "Gagal membersihkan file arsip setelah penyimpanan gagal."
+                )
+
+        return "Berkas tidak dapat disimpan. Coba lagi nanti.", 503
+
+    return "Berkas berhasil diunggah.", 201
+
+@app.route("/archives/<file_id>/download", methods=["GET"])
+def download_archive(file_id):
+    user_id = session.get("user_id")
+
+    if user_id is None:
+        return redirect(url_for("login"))
+
+    try:
+        user = get_user_by_id(user_id)
+    except sqlite3.Error:
+        return "Akun tidak dapat diperiksa. Coba lagi nanti.", 503
+
+    if user is None:
+        session.clear()
+        return redirect(url_for("login"))
+
+    algorithm = request.args.get("algorithm", "AES")
+
+    storage_columns = {
+        "AES": "aes_storage_name",
+        "DES": "des_storage_name",
+        "RC4": "rc4_storage_name",
+    }
+
+    if algorithm not in storage_columns:
+        return "Algoritma tidak valid.", 400
+
+    try:
+        record = get_medical_file(file_id, user_id)
+    except sqlite3.Error:
+        return "Arsip tidak dapat diakses. Coba lagi nanti.", 503
+
+    if record is None:
+        return "Arsip tidak ditemukan.", 404
+
+    context = {
+        "owner_id": user_id,
+        "kind": "file",
+        "item_id": record["id"],
+    }
+
+    try:
+        envelope = read_envelope(record[storage_columns[algorithm]])
+
+        payload = decrypt_blob(
+            envelope,
+            MASTER_KEY,
+            algorithm,
+            context,
+        )
+
+        metadata, file_bytes = unpack_file_payload(payload)
+
+        response = send_file(
+            io.BytesIO(file_bytes),
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name=metadata["filename"],
+        )
+    except (OSError, InvalidEnvelopeError, ValueError, TypeError, KeyError):
+        return "Berkas tidak dapat dibuka atau diverifikasi.", 503
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 if __name__ == "__main__":

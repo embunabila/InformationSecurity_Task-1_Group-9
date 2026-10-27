@@ -1,7 +1,9 @@
+PS C:\Users\nayla\Downloads\InformationSecurity_Task-1_Group-9> Get-Content .gitignore
 
 __pycache__/
 *.py[cod]
 .venv/
+<<<<<<< Updated upstream
 .env
 .env.*
 !.env.example
@@ -18,3 +20,10 @@ results/
 
 !benchmark/results/
 !benchmark/results/**
+=======
+medimo.db
+.env
+instance/
+storage/
+>>>>>>> Stashed changes
+(.venv) PS C:\Users\nayla\Downloads\InformationSecurity_Task-1_Group-9> 
