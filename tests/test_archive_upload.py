@@ -272,6 +272,101 @@ class ArchiveUploadTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(b"Isi file dummy", response.data)
-    
+
+    def test_list_shows_only_current_users_archives(self):
+        record = self.upload_dummy_archive()
+
+        response = self.client.get("/archives")
+
+        self.assertEqual(response.status_code, 200)
+        archives = response.get_json()["archives"]
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0]["id"], record["id"])
+
+        connection = self.db_module.get_connection()
+        try:
+            connection.execute(
+                """
+                INSERT INTO users (id, username, password_hash)
+                VALUES (2, 'other_user', 'dummy_hash')
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.client.session_transaction() as session:
+            session["user_id"] = 2
+
+        response = self.client.get("/archives")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["archives"], [])
+
+    def test_delete_removes_record_and_three_envelopes(self):
+        record = self.upload_dummy_archive()
+
+        response = self.client.post(
+            f"/archives/{record['id']}/delete",
+            data={"csrf_token": "dummy-csrf-token"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(
+            self.db_module.get_medical_file(record["id"], 1)
+        )
+
+        for column in (
+            "aes_storage_name",
+            "des_storage_name",
+            "rc4_storage_name",
+        ):
+            self.assertFalse(
+                self.storage_module.get_storage_path(
+                    record[column]
+                ).exists()
+            )
+
+    def test_delete_rejects_wrong_csrf(self):
+        record = self.upload_dummy_archive()
+
+        response = self.client.post(
+            f"/archives/{record['id']}/delete",
+            data={"csrf_token": "wrong-token"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNotNone(
+            self.db_module.get_medical_file(record["id"], 1)
+        )
+
+    def test_other_user_cannot_delete_archive(self):
+        record = self.upload_dummy_archive()
+
+        connection = self.db_module.get_connection()
+        try:
+            connection.execute(
+                """
+                INSERT INTO users (id, username, password_hash)
+                VALUES (2, 'other_user', 'dummy_hash')
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.client.session_transaction() as session:
+            session["user_id"] = 2
+
+        response = self.client.post(
+            f"/archives/{record['id']}/delete",
+            data={"csrf_token": "dummy-csrf-token"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIsNotNone(
+            self.db_module.get_medical_file(record["id"], 1)
+        )
+
 if __name__ == "__main__":
     unittest.main()

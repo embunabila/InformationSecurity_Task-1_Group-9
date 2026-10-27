@@ -10,6 +10,17 @@ from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 from config import load_master_key
 
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
+
 from flask import Flask, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import (
     check_password_hash,
@@ -33,10 +44,17 @@ from db import (
     get_user_by_id,
     get_user_by_username,
     save_health_profile,
+    delete_medical_file_record,
+    get_medical_files_for_owner,
 )
 
 from file_payload import pack_file_payload, unpack_file_payload
-from storage import delete_envelope_set, write_envelope_set, read_envelope
+from storage import (
+    delete_envelope,
+    delete_envelope_set,
+    read_envelope,
+    write_envelope_set,
+)
 app = Flask(__name__)
 
 secret_key = os.environ.get("SECRET_KEY")
@@ -616,6 +634,96 @@ def download_archive(file_id):
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+@app.route("/archives", methods=["GET"])
+def list_archives():
+    user_id = session.get("user_id")
+
+    if user_id is None:
+        return redirect(url_for("login"))
+
+    try:
+        user = get_user_by_id(user_id)
+
+        if user is None:
+            session.clear()
+            return redirect(url_for("login"))
+
+        records = get_medical_files_for_owner(user_id)
+    except sqlite3.Error:
+        return "Daftar arsip tidak dapat diakses.", 503
+
+    archives = [
+        {
+            "id": record["id"],
+            "category": record["category"],
+            "created_at": record["created_at"],
+        }
+        for record in records
+    ]
+
+    response = jsonify({"archives": archives})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/archives/<file_id>/delete", methods=["POST"])
+def delete_archive(file_id):
+    user_id = session.get("user_id")
+
+    if user_id is None:
+        return redirect(url_for("login"))
+
+    try:
+        user = get_user_by_id(user_id)
+    except sqlite3.Error:
+        return "Akun tidak dapat diperiksa.", 503
+
+    if user is None:
+        session.clear()
+        return redirect(url_for("login"))
+
+    expected_token = session.get("csrf_token")
+    submitted_token = request.form.get("csrf_token", "")
+
+    if (
+        not isinstance(expected_token, str)
+        or not hmac.compare_digest(
+            submitted_token.encode("utf-8"),
+            expected_token.encode("utf-8"),
+        )
+    ):
+        return "Form tidak valid. Muat ulang halaman dan coba lagi.", 400
+
+    try:
+        record = get_medical_file(file_id, user_id)
+    except sqlite3.Error:
+        return "Arsip tidak dapat diakses.", 503
+
+    if record is None:
+        return "Arsip tidak ditemukan.", 404
+
+    # Hapus semua salinan sebelum menghapus catatan database.
+    try:
+        for column in (
+            "aes_storage_name",
+            "des_storage_name",
+            "rc4_storage_name",
+        ):
+            delete_envelope(record[column])
+    except (OSError, ValueError):
+        app.logger.error("Gagal menghapus salinan arsip.")
+        return "Arsip belum berhasil dihapus. Coba lagi nanti.", 503
+
+    try:
+        deleted = delete_medical_file_record(file_id, user_id)
+    except sqlite3.Error:
+        return "Catatan arsip belum berhasil dihapus. Coba lagi nanti.", 503
+
+    if not deleted:
+        return "Arsip tidak ditemukan.", 404
+
+    return "Arsip berhasil dihapus.", 200
 
 if __name__ == "__main__":
     app.run()
