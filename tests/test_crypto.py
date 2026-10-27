@@ -5,6 +5,7 @@ from crypto_core import (
     CryptoConfigError,
     _validate_master_key,
     _derive_keys,
+    _encode_context,
 )
 
 
@@ -127,6 +128,130 @@ class KeyDerivationTests(unittest.TestCase):
                     b"pendek", self.salt, algorithm
                 )
 
+class ContextTests(unittest.TestCase):
+
+    def setUp(self):
+        self.profile_context = {
+            "owner_id": 7,
+            "kind": "profile",
+            "item_id": "profile",
+        }
+        self.file_id = "550e8400-e29b-41d4-a716-446655440000"
+        self.file_context = {
+            "owner_id": 7,
+            "kind": "file",
+            "item_id": self.file_id,
+        }
+
+    def assert_invalid_context(self, context):
+        with self.assertRaises(ValueError) as caught:
+            _encode_context(context)
+
+        self.assertIs(type(caught.exception), ValueError)
+
+    def test_profile_encoding_matches_expected_bytes(self):
+        expected = (
+            b'{"item_id":"profile","kind":"profile","owner_id":7}'
+        )
+
+        self.assertEqual(_encode_context(self.profile_context), expected)
+
+    def test_file_encoding_matches_expected_bytes(self):
+        expected = (
+            b'{"item_id":"550e8400-e29b-41d4-a716-446655440000",'
+            b'"kind":"file","owner_id":7}'
+        )
+
+        self.assertEqual(_encode_context(self.file_context), expected)
+
+    def test_dictionary_order_does_not_change_encoding(self):
+        reordered = {
+            "item_id": "profile",
+            "owner_id": 7,
+            "kind": "profile",
+        }
+
+        self.assertEqual(
+            _encode_context(self.profile_context),
+            _encode_context(reordered),
+        )
+
+    def test_rejects_non_dictionary_context(self):
+        for context in (None, "", b"", [], 7):
+            with self.subTest(context=context):
+                self.assert_invalid_context(context)
+
+    def test_rejects_missing_or_extra_fields(self):
+        for field in ("owner_id", "kind", "item_id"):
+            context = self.profile_context.copy()
+            del context[field]
+
+            with self.subTest(missing_field=field):
+                self.assert_invalid_context(context)
+
+        context = self.profile_context.copy()
+        context["extra"] = "unexpected"
+        self.assert_invalid_context(context)
+
+    def test_rejects_invalid_owner_id(self):
+        for owner_id in (True, False, 0, -1, 7.0, "7", None, []):
+            context = self.profile_context.copy()
+            context["owner_id"] = owner_id
+
+            with self.subTest(owner_id=owner_id):
+                self.assert_invalid_context(context)
+
+    def test_rejects_invalid_kind(self):
+        for kind in ("PROFILE", "document", "", None, 7, []):
+            context = self.profile_context.copy()
+            context["kind"] = kind
+
+            with self.subTest(kind=kind):
+                self.assert_invalid_context(context)
+
+    def test_rejects_invalid_profile_item_id(self):
+        for item_id in ("PROFILE", "", self.file_id, None, 7, b"profile"):
+            context = self.profile_context.copy()
+            context["item_id"] = item_id
+
+            with self.subTest(item_id=item_id):
+                self.assert_invalid_context(context)
+
+    def test_rejects_invalid_file_item_id(self):
+        invalid_ids = (
+            self.file_id.upper(),
+            self.file_id.replace("-", ""),
+            "{" + self.file_id + "}",
+            "urn:uuid:" + self.file_id,
+            " " + self.file_id,
+            self.file_id + " ",
+            self.file_id[:-1] + "g",
+            "profile",
+            "",
+            None,
+            7,
+            self.file_id.encode("ascii"),
+        )
+
+        for item_id in invalid_ids:
+            context = self.file_context.copy()
+            context["item_id"] = item_id
+
+            with self.subTest(item_id=item_id):
+                self.assert_invalid_context(context)
+
+    def test_different_valid_contexts_have_different_encodings(self):
+        other_owner = self.file_context.copy()
+        other_owner["owner_id"] = 8
+
+        other_item = self.file_context.copy()
+        other_item["item_id"] = "550e8400-e29b-41d4-a716-446655440001"
+
+        original = _encode_context(self.file_context)
+
+        for context in (other_owner, other_item, self.profile_context):
+            with self.subTest(context=context):
+                self.assertNotEqual(original, _encode_context(context))
 
 if __name__ == "__main__":
     unittest.main()

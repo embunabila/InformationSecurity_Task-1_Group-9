@@ -312,3 +312,75 @@ Tes kripto minimal:
 - Penanganan penyimpanan parsial.
 
 Kalau ada kontrak yang perlu diubah, koordinasikan dulu sebelum mengubah kode yang dipakai bagian lain. Commit, push, PR, dan merge tetap dijalankan sendiri secara manual oleh anggota kelompok.
+
+
+**Tambahan kontrak yg udah kita sepakati:**
+
+langkah 2 done, udah aku test juga hasilnya 19 tests ok, buat langkah 3 udah aku bahas sama temenku tentang format context, envelope, dan error. aku udah nyusun pilihan desain, sekarang aku pilih aturan di bawah buat jadi dasar implementasinya, detail tambahan ini nanti aku koordinasiin ke nayla
+
+- context berupa dictionary dengan tepat tiga field yaitu `owner_id`, `kind`, dan `item_id`
+- `owner_id` harus integer positif, boolean kayak `True` dan `False` ditolak
+- `kind` cuma boleh `"profile"` atau `"file"`
+- kalau profile, `item_id` harus `"profile"`
+- kalau file, `item_id` berupa string uuid dengan huruf kecil dan tanda hubung yang dibuat backend sebelum enkripsi
+- context diambil backend dari session dan data yang sudah dicek kepemilikannya
+- context nggak disimpan ulang di envelope, backend harus nyediain context saat dekripsi
+
+buat encoding, aku pilih json dengan `sort_keys=True`, `separators=(",", ":")`, dan `ensure_ascii=True`, terus diubah ke utf-8 bytes
+
+tujuannya supaya context dengan isi sama tetap menghasilkan bytes yang sama walaupun urutan field dictionary beda
+
+
+
+aku pilih paket biner dengan urutan berikut
+
+- penanda format `b"MDMO"` sepanjang 4 byte
+- versi format dengan nilai 1 sepanjang 1 byte
+- id algoritma sepanjang 1 byte, AES = 1, DES = 2, RC4 = 3
+- salt sepanjang 16 byte
+- panjang ciphertext sepanjang 4 byte unsigned big-endian
+- iv sepanjang 16 byte untuk aes, 8 byte untuk des, dan tidak ada untuk rc4
+- ciphertext sesuai panjang yang tercatat
+- tag hmac-sha256 sepanjang 32 byte
+
+versi dan id algoritma disimpan sebagai angka biner satu byte, bukan karakter teks
+
+penanda format sampai iv disebut header, semua bagian header ikut dilindungi hmac
+
+
+
+urutannya aku pilih
+
+`header + panjang context + context bytes + ciphertext`
+
+panjang context ditulis dalam 4 byte unsigned big-endian dan dihitung dari jumlah bytes hasil encoding
+
+context dan panjang context hanya dipakai buat perhitungan hmac, nggak ikut disimpan di envelope
+
+tag hmac sendiri nggak ikut dimasukkan ke perhitungannya
+
+saat dekripsi, struktur dan batas ukuran dicek dulu, lalu hmac diverifikasi sebelum dekripsi dan pelepasan padding
+
+
+
+- `CryptoConfigError` untuk master key yang bukan bytes atau panjangnya bukan 32 byte
+- `ValueError` untuk input pemanggil yang bentuknya salah, misalnya data atau envelope bukan bytes, nama algoritma tidak didukung, atau context tidak valid
+- `InvalidEnvelopeError` untuk envelope bytes yang rusak, terpotong, punya tambahan bytes, atau versinya tidak dikenal
+- `InvalidEnvelopeError` juga untuk algoritma paket yang berbeda dari `expected_algorithm` yang valid
+- kalau master key atau context bentuknya valid tapi nilainya nggak cocok dengan paket, hasilnya juga `InvalidEnvelopeError`
+
+jadi aku mau bedain kesalahan bentuk input dari kegagalan verifikasi paket
+
+
+
+modul kripto boleh menerima `b""`, tapi backend tetap bisa menolak upload kosong sesuai aturan aplikasi
+
+batas payload tetap 25 mib + 16 kib + 4 byte sesuai kontrak sebelumnya
+
+batas envelope perlu dihitung dari batas payload ditambah header, iv, padding, dan tag supaya pengecekannya konsisten
+
+tolong review dulu apakah keputusan ini konsisten sama kontrak dan ada bagian yang masih ambigu atau berpotensi salah
+
+kalau ada koreksi, jelasin alasannya dan kasih referensi resmi yang relevan, bedain juga mana aturan library dan mana pilihan desain kita sendiri
+
+setelah itu bantu aku lanjut langkah 4 secara bertahap, mulai dari validasi dan encoding context beserta testnya dulu
