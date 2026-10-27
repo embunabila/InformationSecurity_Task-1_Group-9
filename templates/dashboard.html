@@ -1,18 +1,1 @@
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Dashboard — Medimo</title>
-</head>
-<body>
-    <h1>Dashboard Medimo</h1>
-    <p>Selamat datang, {{ user["username"] }}!</p>
-    <p>Kamu berhasil login.</p>
-    <form method="post" action="{{ url_for('logout') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <a href="{{ url_for('health_profile') }}">Profil kesehatan</a>
-    <button type="submit">Keluar</button>
-</form>
-</body>
-</html>
+{% extends "app_base.html" %}{% block title %}Dashboard — Medimo{% endblock %}{% block content %}<header class="top"><div><span class="eyebrow">DASHBOARD</span><h1>Hello, {{ user["username"] }}! <span class="wave">✦</span></h1><p class="muted">Welcome to your personal health space.</p></div><div class="avatar" aria-hidden="true">{{ user["username"][0]|upper }}</div></header><section class="hero"><div><span class="pill">PERSONAL HEALTH RECORDS</span><h2>Your health records,<br>close at hand.</h2><p>Manage your health profile and important files in one place.</p><a class="button white" href="{{ url_for('health_profile') }}">Complete profile <span>→</span></a></div><div class="hero-art" aria-hidden="true"><div class="art-card">✚<small>MEDIMO</small></div><span class="art-spark">✧</span></div></section><div class="section-title"><div><span class="eyebrow">QUICK ACCESS</span><h2>Start here</h2></div></div><div class="quick-grid"><a class="quick card" href="{{ url_for('health_profile') }}"><span class="icon">♙</span><div><h3>Health profile</h3><p>Add or update your personal information.</p></div><span class="arrow">↗</span></a><a class="quick card" href="#arsip"><span class="icon">▤</span><div><h3>Upload file</h3><p>Add a file to your archive.</p></div><span class="arrow">↗</span></a></div><section id="arsip" class="archive-grid"><div class="card panel"><span class="eyebrow">HEALTH ARCHIVE</span><h2>Upload file</h2><p class="muted">Choose a category and file to save.</p><form id="upload-form" class="stack" method="post" action="{{ url_for('upload_archive') }}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label for="category">Category</label><select id="category" name="category" required><option value="">Select a category</option><option value="identity">Identity (KTP / BPJS)</option><option value="document">Health document</option><option value="video">Video</option></select><label for="file">File</label><input id="file" name="file" type="file" required><small>Maximum file size: 25 MiB.</small><button class="button primary" type="submit">Upload file <span>↑</span></button><div id="upload-message" role="status" aria-live="polite"></div></form></div><div class="card panel" id="archive-app" data-list-url="{{ url_for('list_archives') }}" data-download-template="{{ url_for('download_archive', file_id='FILE_ID') }}" data-delete-template="{{ url_for('delete_archive', file_id='FILE_ID') }}" data-csrf="{{ csrf_token }}"><span class="eyebrow">YOUR COLLECTION</span><h2>Your archive</h2><p class="muted">Choose an algorithm to download a file.</p><div id="archive-message" role="status" aria-live="polite">Loading your archive…</div><div id="archive-list"></div><noscript>Enable JavaScript to view and manage your archive.</noscript><small class="muted">File names are not yet displayed; use the category, date, and ID to identify a file.</small></div></section><script src="{{ url_for('static', filename='js/archives.js') }}" defer></script>{% endblock %}
