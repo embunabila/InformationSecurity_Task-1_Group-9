@@ -6,6 +6,7 @@ import sqlite3
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
+from config import load_master_key
 
 from flask import Flask, redirect, render_template, request, session, url_for
 from werkzeug.security import (
@@ -13,14 +14,38 @@ from werkzeug.security import (
     generate_password_hash,
 )
 
-from db import create_user, get_user_by_id, get_user_by_username
 
+import json
 
+from crypto_core import (
+    ALGORITHMS,
+    InvalidEnvelopeError,
+    decrypt_blob,
+    encrypt_blob,
+)
+from db import (
+    create_user,
+    get_health_profile_envelopes,
+    get_user_by_id,
+    get_user_by_username,
+    save_health_profile,
+)
 app = Flask(__name__)
 
-app.config["SECRET_KEY"] = os.environ["SECRET_KEY"]
+secret_key = os.environ.get("SECRET_KEY")
+if not secret_key:
+    raise RuntimeError("SECRET_KEY is not configured in the environment.")
+
+app.config["SECRET_KEY"] = secret_key
+MASTER_KEY = load_master_key()
+
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+@app.route("/")
+def home():
+    return redirect(url_for("login"))
+
 
 USERNAME_PATTERN = re.compile(r"[a-z0-9_]{3,30}")
 
@@ -265,6 +290,63 @@ def logout():
 
     return redirect(url_for("login"))
 
+def profile_context(user_id):
+    return {
+        "owner_id": user_id,
+        "kind": "profile",
+        "item_id": "profile",
+    }
+
+
+def encrypt_profile(profile, user_id):
+    plaintext = json.dumps(
+        profile,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    context = profile_context(user_id)
+
+    return {
+        algorithm: encrypt_blob(
+            plaintext,
+            MASTER_KEY,
+            algorithm,
+            context,
+        )
+        for algorithm in ALGORITHMS
+    }
+
+
+def decrypt_profile(envelopes, user_id):
+    context = profile_context(user_id)
+    decrypted_profiles = []
+
+    for algorithm in ALGORITHMS:
+        envelope = envelopes[f"{algorithm.lower()}_envelope"]
+        plaintext = decrypt_blob(
+            envelope,
+            MASTER_KEY,
+            algorithm,
+            context,
+        )
+        profile = json.loads(plaintext.decode("utf-8"))
+
+        if not isinstance(profile, dict):
+            raise ValueError("Format profil tidak valid.")
+
+        decrypted_profiles.append(profile)
+
+    # Pastikan ketiga salinan berisi data profil yang sama.
+    if not (
+        decrypted_profiles[0]
+        == decrypted_profiles[1]
+        == decrypted_profiles[2]
+    ):
+        raise ValueError("Isi envelope profil tidak konsisten.")
+
+    return decrypted_profiles[0]
+
 @app.route("/profile", methods=["GET", "POST"])
 def health_profile():
     user_id = session.get("user_id")
@@ -285,6 +367,30 @@ def health_profile():
     valid = False
     age = None
     today = today_jakarta()
+    profile = None
+    storage_error = False
+
+    envelopes = get_health_profile_envelopes(user_id)
+
+    if envelopes is not None:
+        try:
+            profile = decrypt_profile(envelopes, user_id)
+            birth_date_text = profile.get("birth_date") or ""
+
+            if birth_date_text:
+                birth_date = date.fromisoformat(birth_date_text)
+                age = calculate_age(birth_date, today)
+
+        except (
+            InvalidEnvelopeError,
+            ValueError,
+            UnicodeDecodeError,
+            KeyError,
+            TypeError,
+        ):
+            storage_error = True
+            profile = None
+            age = None
 
     if request.method == "POST":
         submitted_token = request.form.get("csrf_token", "")
@@ -298,17 +404,33 @@ def health_profile():
         profile, errors, age = validate_profile(request.form, today)
         valid = not errors
 
-        # Belum ada enkripsi atau penyimpanan.
-        # Jangan masukkan profile ke session, log, atau file.
+        if valid:
+            try:
+                encrypted = encrypt_profile(profile, user_id)
+
+                save_health_profile(
+                    user_id,
+                    encrypted["AES"],
+                    encrypted["DES"],
+                    encrypted["RC4"],
+                )
+            except (ValueError, TypeError):
+                storage_error = True
+                valid = False
+            else:
+                return redirect(url_for("health_profile", saved="1"))
 
     response = app.make_response(
         render_template(
             "profile.html",
             errors=errors,
             valid=valid,
-            age=age if valid else None,
+            age=age,
             today=today.isoformat(),
             csrf_token=session["csrf_token"],
+            profile=profile or {},
+            saved=request.args.get("saved") == "1",
+            storage_error=storage_error,
         )
     )
     response.headers["Cache-Control"] = "no-store"
